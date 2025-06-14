@@ -27,8 +27,12 @@ class SmartCrawler:
     """智能爬虫 - 简洁的接口层"""
     
     def __init__(self):
-        self.orchestrator = WebOrchestrator()
+        # 为每个任务生成唯一ID
+        from datetime import datetime
+        self.task_id = f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        self.orchestrator = WebOrchestrator(self.task_id)
         logger.info("🚀 智能爬虫初始化完成")
+        logger.info(f"📋 任务ID: {self.task_id}")
     
     async def crawl(self, instruction: str, url: str = None) -> Dict[str, Any]:
         """执行爬取任务"""

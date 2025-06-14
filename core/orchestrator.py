@@ -2,16 +2,19 @@
 核心编排器 - 基于ReAct模式的智能网页自动化系统
 """
 import os
+import asyncio
 import logging
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
 from enum import Enum
+from datetime import datetime
 
 from langgraph.graph import StateGraph, END
 from langchain_openai import ChatOpenAI
 from langchain.schema import HumanMessage, SystemMessage
 from .browser import BrowserCore
-from .prompts import SystemPrompt, AgentStatePrompt, PlannerPrompt, DataExtractionPrompt
+from .prompts import SystemPrompt
+from .visual_agent import VisualPageAnalyzer, MultimodalPromptBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -62,58 +65,93 @@ class CoreAgent:
 
 
 class Planner(CoreAgent):
-    """规划者 - 基于专业提示词的单步规划"""
+    """规划者 - 基于视觉多模态的单步规划"""
     
-    def __init__(self):
+    def __init__(self, task_id: str = None):
         super().__init__("planner")
         self.system_prompt = SystemPrompt()
+        self.visual_analyzer = VisualPageAnalyzer(task_id)
     
-    async def plan_next_step(self, context: WebContext) -> Dict[str, Any]:
-        """单步规划 - 使用专业提示词系统"""
-        logger.info(f"🎯 Planner: 规划第 {context.step_count + 1} 步")
+    async def plan_next_step(self, context: WebContext, page) -> Dict[str, Any]:
+        """单步规划 - 使用视觉+文本多模态分析"""
+        logger.info(f"🎯 Planner: 视觉分析第 {context.step_count + 1} 步")
         
-        # 使用新的提示词系统
-        state_prompt = AgentStatePrompt(context)
+        # 1. 视觉页面分析
+        analysis_context = {
+            'step_count': context.step_count,
+            'last_action': context.last_action,
+            'instruction': context.instruction,
+            'extracted_data': context.extracted_data
+        }
+        screenshot_base64, interactive_elements = await self.visual_analyzer.analyze_page(page, analysis_context)
         
+        # 2. 构建多模态提示
+        context_info = {
+            'step_count': context.step_count,
+            'last_action': context.last_action,
+            'page_url': page.url,
+            'extracted_data': context.extracted_data
+        }
+        
+        visual_prompt = MultimodalPromptBuilder.build_visual_prompt(
+            screenshot_base64,
+            interactive_elements,
+            context.instruction,
+            context_info
+        )
+        
+        # 3. 发送多模态请求
         response = await self.llm.ainvoke([
             self.system_prompt.get_system_message(),
-            state_prompt.get_user_message()
+            visual_prompt
         ])
         
-        # 解析 ReAct 格式的响应
+        # 4. 保存元素信息到上下文（供执行器使用）
+        context.current_page_state['interactive_elements'] = {
+            elem.element_id: {
+                'selector': elem.selector,
+                'bounds': elem.bounds,
+                'role': elem.role,
+                'text': elem.text
+            } for elem in interactive_elements
+        }
+        
+        # 解析结构化JSON响应
         import json
         import re
         try:
             content = response.content
-            logger.info(f"🤖 LLM推理: {content[:200]}...")
+            logger.info(f"🤖 LLM响应: {content[:100]}...")
             
-            # 提取 Thought
-            thought_match = re.search(r'Thought:\s*(.*?)(?=Action:|$)', content, re.DOTALL)
-            if thought_match:
-                thought = thought_match.group(1).strip()
-                logger.info(f"💭 Thought: {thought}")
-            
-            # 提取 Action
-            json_match = re.search(r'Action:\s*(\{.*?\})', content, re.DOTALL)
+            # 尝试直接解析JSON
+            json_match = re.search(r'\{.*\}', content, re.DOTALL)
             if json_match:
-                action = json.loads(json_match.group(1))
-                logger.info(f"📋 Action: {action['type']} {action.get('target', '')}")
-                return action
-            else:
-                # 如果没找到标准格式，尝试直接解析JSON
-                json_match = re.search(r'\{.*\}', content, re.DOTALL)
-                if json_match:
-                    action = json.loads(json_match.group())
+                structured_response = json.loads(json_match.group())
+                
+                # 验证必要字段
+                if "action" in structured_response and "type" in structured_response["action"]:
+                    action = structured_response["action"]
+                    reasoning = structured_response.get("reasoning", "无推理信息")
+                    confidence = structured_response.get("confidence", 0.5)
+                    
+                    logger.info(f"💭 推理: {reasoning[:100]}...")
+                    logger.info(f"📋 操作: {action['type']} → {action.get('target', '')} (置信度: {confidence})")
+                    
                     return action
                 else:
-                    raise ValueError("无法解析操作")
+                    raise ValueError("响应缺少必要的action字段")
+            else:
+                raise ValueError("无法找到JSON格式的响应")
+                
         except Exception as e:
-            logger.error(f"❌ 规划失败: {e}")
+            logger.error(f"❌ 解析响应失败: {e}")
+            logger.error(f"原始响应: {content}")
+            
             # 根据步数返回合理的默认操作
             if context.step_count == 0:
-                return {"type": "navigate", "target": context.url}
+                return {"type": "navigate", "target": context.url, "description": "初始导航"}
             else:
-                return {"type": "wait", "ms": 1000}
+                return {"type": "wait", "ms": 2000, "description": "等待页面稳定"}
     
     def _build_context_prompt(self, context: WebContext) -> str:
         """构建上下文提示"""
@@ -186,7 +224,7 @@ class Executor(CoreAgent):
         """执行单个操作并返回结果"""
         logger.info(f"⚡ 执行第 {context.step_count + 1} 步: {action['type']} {action.get('target', '')}")
         
-        result = await self._execute_mcp_action(action)
+        result = await self._execute_mcp_action(action, context)
         
         # 执行后立即观察页面状态
         await self.observe_page_state(context)
@@ -240,7 +278,7 @@ class Executor(CoreAgent):
         
         return context
     
-    async def _execute_mcp_action(self, action: Dict[str, Any]) -> Dict[str, Any]:
+    async def _execute_mcp_action(self, action: Dict[str, Any], context: WebContext = None) -> Dict[str, Any]:
         """执行单个MCP操作 - 使用增强的BrowserCore"""
         action_type = action["type"]
         
@@ -263,47 +301,84 @@ class Executor(CoreAgent):
                 
             elif action_type == "click":
                 target = action["target"]
-                # 智能选择器列表
-                selectors = [
-                    f".{target}",
-                    f"#{target}",
-                    f"[class*='{target}']",
-                    f"[data-v-*='{target}']",
-                    f"[placeholder*='搜索']",
-                    "input[class*='search']",
-                    ".nav-search-input",
-                    ".nav-search-btn"
-                ]
                 
-                success = await self.browser.smart_click(selectors)
-                return {"status": "clicked", "element": target, "success": success}
+                # 优先使用视觉分析的元素信息
+                interactive_elements = context.current_page_state.get('interactive_elements', {}) if context else {}
+                if target in interactive_elements:
+                    element_info = interactive_elements[target]
+                    # 使用精确的位置点击
+                    bounds = element_info['bounds']
+                    x = bounds['x'] + bounds['width'] / 2
+                    y = bounds['y'] + bounds['height'] / 2
+                    
+                    await self.browser.page.mouse.click(x, y)
+                    logger.info(f"🎯 精确点击元素: {target} at ({x}, {y})")
+                    return {"status": "clicked", "element": target, "success": True}
+                else:
+                    # 回退到传统选择器方式
+                    selectors = [
+                        f".{target}",
+                        f"#{target}",
+                        f"[class*='{target}']",
+                        "input[class*='search']",
+                        ".nav-search-input",
+                        ".nav-search-btn"
+                    ]
+                    success = await self.browser.smart_click(selectors)
+                    return {"status": "clicked", "element": target, "success": success}
                 
             elif action_type == "type":
                 target = action["target"] 
                 value = action.get("value", "Python教程")
                 
-                # 智能输入框选择器
-                selectors = [
-                    f".{target}",
-                    f"#{target}",
-                    f"[class*='{target}']",
-                    "input[class*='search']",
-                    "input[placeholder*='搜索']",
-                    ".nav-search-input",
-                    "#nav-searchform-compl"
-                ]
-                
-                success = await self.browser.smart_input(selectors, value)
-                return {"status": "typed", "text": value, "success": success}
+                # 优先使用视觉分析的元素信息
+                interactive_elements = context.current_page_state.get('interactive_elements', {}) if context else {}
+                if target in interactive_elements:
+                    element_info = interactive_elements[target]
+                    # 使用精确的位置点击然后输入
+                    bounds = element_info['bounds']
+                    x = bounds['x'] + bounds['width'] / 2
+                    y = bounds['y'] + bounds['height'] / 2
+                    
+                    await self.browser.page.mouse.click(x, y)
+                    await self.browser.page.keyboard.type(value)
+                    logger.info(f"🎯 精确输入到元素: {target} - '{value}'")
+                    return {"status": "typed", "text": value, "success": True}
+                else:
+                    # 回退到传统选择器方式
+                    selectors = [
+                        f".{target}",
+                        f"#{target}",
+                        f"[class*='{target}']",
+                        "input[class*='search']",
+                        "input[placeholder*='搜索']",
+                        ".nav-search-input",
+                        "#nav-searchform-compl"
+                    ]
+                    success = await self.browser.smart_input(selectors, value)
+                    return {"status": "typed", "text": value, "success": success}
                 
             elif action_type == "extract":
                 # 等待页面加载
                 await self.browser.page.wait_for_timeout(3000)
                 
-                # 尝试提取数据
-                videos = await self._extract_videos()
-                logger.info(f"📊 成功提取 {len(videos)} 个视频")
-                return {"status": "extracted", "data": videos, "success": len(videos) > 0}
+                # 根据页面类型选择提取方法
+                current_url = self.browser.page.url
+                if "bilibili.com" in current_url:
+                    data = await self._extract_videos()
+                    data_type = "视频"
+                elif "google.com" in current_url:
+                    data = await self._extract_search_results()
+                    data_type = "搜索结果"
+                elif "github.com" in current_url:
+                    data = await self._extract_github_repos()
+                    data_type = "代码仓库"
+                else:
+                    data = await self._extract_generic_links()
+                    data_type = "链接"
+                
+                logger.info(f"📊 成功提取 {len(data)} 个{data_type}")
+                return {"status": "extracted", "data": data, "success": len(data) > 0}
                 
             elif action_type == "check_goal":
                 # 检查目标是否达成
@@ -377,6 +452,174 @@ class Executor(CoreAgent):
             logger.error(f"❌ 提取失败: {e}")
             return []
     
+    async def _extract_search_results(self) -> List[Dict]:
+        """提取Google搜索结果"""
+        try:
+            results = []
+            
+            # Google搜索结果选择器
+            result_selectors = [
+                "[data-sokoban-container] h3",  # 新版Google
+                ".g h3",                        # 标准结果
+                ".rc h3",                       # 传统结果
+                "h3"                           # 通用H3标题
+            ]
+            
+            for selector in result_selectors:
+                elements = await self.browser.page.query_selector_all(selector)
+                if elements:
+                    logger.info(f"🔍 找到 {len(elements)} 个搜索结果: {selector}")
+                    
+                    for i, element in enumerate(elements[:3]):  # 限制前3个
+                        try:
+                            # 获取标题
+                            title = await element.inner_text()
+                            if not title or len(title.strip()) < 5:
+                                continue
+                                
+                            # 查找父级容器中的链接
+                            parent = element
+                            link_elem = None
+                            for _ in range(3):  # 向上查找3级
+                                parent = await parent.query_selector("xpath=..")
+                                if not parent:
+                                    break
+                                link_elem = await parent.query_selector("a[href]")
+                                if link_elem:
+                                    break
+                            
+                            # 如果在父级没找到，尝试兄弟元素
+                            if not link_elem:
+                                link_elem = await element.query_selector("xpath=../a") or await element.query_selector("xpath=../../a")
+                            
+                            href = ""
+                            if link_elem:
+                                href = await link_elem.get_attribute("href")
+                            
+                            # 查找描述信息
+                            description = ""
+                            try:
+                                desc_parent = element
+                                for _ in range(3):
+                                    desc_parent = await desc_parent.query_selector("xpath=..")
+                                    if not desc_parent:
+                                        break
+                                    desc_elem = await desc_parent.query_selector("[data-sncf], .s, .st")
+                                    if desc_elem:
+                                        description = await desc_elem.inner_text()
+                                        break
+                            except:
+                                pass
+                            
+                            if title and title.strip():
+                                results.append({
+                                    "title": title.strip()[:200],  # 限制长度
+                                    "url": href if href and href.startswith("http") else "",
+                                    "description": description.strip()[:300] if description else title.strip()
+                                })
+                        except Exception as e:
+                            logger.debug(f"提取单个结果失败: {e}")
+                            continue
+                    
+                    if results:  # 找到结果就停止
+                        break
+            
+            # 如果上述方法都没找到，使用更通用的方法
+            if not results:
+                logger.info("🔍 使用通用方法提取搜索结果")
+                links = await self.browser.page.query_selector_all("a[href*='http']:not([href*='google.com'])")
+                for i, link in enumerate(links[:3]):
+                    try:
+                        title = await link.inner_text()
+                        href = await link.get_attribute("href")
+                        if title and href and len(title.strip()) > 5:
+                            results.append({
+                                "title": title.strip()[:200],
+                                "url": href,
+                                "description": f"搜索结果 - {title.strip()}"
+                            })
+                    except:
+                        continue
+            
+            return results
+                    
+        except Exception as e:
+            logger.error(f"❌ Google搜索结果提取失败: {e}")
+            return []
+    
+    async def _extract_github_repos(self) -> List[Dict]:
+        """提取GitHub仓库信息"""
+        try:
+            repos = []
+            
+            # GitHub仓库选择器
+            repo_selectors = [
+                "[data-testid='results-list'] article",
+                ".repo-list-item",
+                ".Box-row"
+            ]
+            
+            for selector in repo_selectors:
+                elements = await self.browser.page.query_selector_all(selector)
+                if elements:
+                    logger.info(f"📁 找到 {len(elements)} 个仓库: {selector}")
+                    
+                    for i, element in enumerate(elements[:5]):
+                        try:
+                            title_elem = await element.query_selector("h3 a, .f4 a")
+                            title = await title_elem.inner_text() if title_elem else f"项目{i+1}"
+                            
+                            link_elem = await element.query_selector("h3 a, .f4 a")
+                            href = await link_elem.get_attribute("href") if link_elem else ""
+                            
+                            if href and not href.startswith("http"):
+                                href = f"https://github.com{href}"
+                            
+                            # 获取描述
+                            desc_elem = await element.query_selector("p, .color-fg-muted")
+                            description = await desc_elem.inner_text() if desc_elem else ""
+                            
+                            repos.append({
+                                "title": title.strip(),
+                                "url": href,
+                                "description": description.strip() if description else f"GitHub项目 - {title}"
+                            })
+                        except:
+                            continue
+                    break
+            
+            return repos
+                    
+        except Exception as e:
+            logger.error(f"❌ GitHub仓库提取失败: {e}")
+            return []
+    
+    async def _extract_generic_links(self) -> List[Dict]:
+        """提取通用链接"""
+        try:
+            links = []
+            elements = await self.browser.page.query_selector_all("a[href]:not([href*='google.com']):not([href*='javascript'])")
+            
+            for i, element in enumerate(elements[:5]):
+                try:
+                    title = await element.inner_text()
+                    href = await element.get_attribute("href")
+                    
+                    if title and href and len(title.strip()) > 3:
+                        links.append({
+                            "title": title.strip()[:200],
+                            "url": href if href.startswith("http") else f"https://{href}",
+                            "description": f"链接 - {title.strip()}"
+                        })
+                except:
+                    continue
+            
+            return links
+                    
+        except Exception as e:
+            logger.error(f"❌ 通用链接提取失败: {e}")
+            return []
+    
     async def _check_goal_completion(self, context: WebContext) -> bool:
         """检查目标是否完成"""
         # 简单的目标检测逻辑
@@ -400,10 +643,13 @@ class Extractor(CoreAgent):
     async def process(self, context: WebContext) -> WebContext:
         logger.info(f"📊 Extractor: 优化提取数据")
         
-        # 使用新的context结构
+        # 检查是否有提取的数据
         if not context.extracted_data:
             context.execution_log.append("⚠️ 未找到可提取的数据")
             return context
+        
+        # 获取原始数据
+        raw_data = context.extracted_data
         
         # 使用LLM优化和结构化数据
         prompt = f"""
@@ -427,15 +673,14 @@ class Extractor(CoreAgent):
             json_match = re.search(r'\[.*\]', response.content, re.DOTALL)
             if json_match:
                 structured_data = json.loads(json_match.group())
-                context.extracted_data.extend(structured_data)
+                context.extracted_data = structured_data  # 替换而不是扩展
                 context.execution_log.append(f"✅ 结构化了 {len(structured_data)} 条数据")
             else:
-                # 回退到原始数据
-                context.extracted_data.extend(raw_data)
+                # 保持原始数据不变
                 context.execution_log.append(f"⚠️ 使用原始数据 {len(raw_data)} 条")
                 
         except Exception as e:
-            context.extracted_data.extend(raw_data)
+            # 保持原始数据不变
             context.execution_log.append(f"⚠️ 结构化失败，使用原始数据: {e}")
         
         return context
@@ -444,8 +689,9 @@ class Extractor(CoreAgent):
 class WebOrchestrator:
     """Web编排器 - 智能循环重试协调系统"""
     
-    def __init__(self):
-        self.planner = Planner()
+    def __init__(self, task_id: str = None):
+        self.task_id = task_id or f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        self.planner = Planner(self.task_id)
         self.executor = Executor()
         self.extractor = Extractor()
         self.workflow = self._build_workflow()
@@ -505,8 +751,13 @@ class WebOrchestrator:
             # 🔄 主循环：单步规划-执行-检查
             while context.step_count < context.max_steps and not context.goal_achieved:
                 
-                # 1️⃣ 规划下一步
-                next_action = await self.planner.plan_next_step(context)
+                # 确保浏览器已启动
+                if not self.executor.browser.page:
+                    await self.executor.browser.start(headless=False)
+                    await self.executor.browser.navigate_to(context.url)
+                
+                # 1️⃣ 视觉分析并规划下一步
+                next_action = await self.planner.plan_next_step(context, self.executor.browser.page)
                 
                 # 2️⃣ 执行单步操作  
                 result = await self.executor.execute_single_action(next_action, context)
