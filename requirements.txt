@@ -1,0 +1,8 @@
+langgraph
+langchain
+langchain-openai
+playwright
+fastapi
+pydantic
+python-dotenv
+mcp  # Model Context Protocol client

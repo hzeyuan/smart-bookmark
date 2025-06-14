@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir:*)",
+      "Bash(uv venv:*)",
+      "Bash(source:*)",
+      "Bash(uv pip install:*)",
+      "Bash(patchright install:*)",
+      "Bash(cp:*)",
+      "Bash(find:*)",
+      "Bash(python:*)",
+      "Bash(cat:*)",
+      "Bash(pip show:*)",
+      "Bash(uv pip:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(rm:*)",
+      "Bash(npx:*)",
+      "WebFetch(domain:www.anthropic.com)",
+      "Bash(playwright install)"
+    ],
+    "deny": []
+  }
+}
