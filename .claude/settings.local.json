@@ -16,7 +16,21 @@
       "Bash(rm:*)",
       "Bash(npx:*)",
       "WebFetch(domain:www.anthropic.com)",
-      "Bash(playwright install)"
+      "Bash(playwright install)",
+      "Bash(pip install:*)",
+      "Bash(playwright install chromium)",
+      "Bash(playwright --version)",
+      "Bash(playwright install:*)",
+      "Bash(git add:*)",
+      "Bash(rg:*)",
+      "WebFetch(domain:deepwiki.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(ls:*)",
+      "Bash(mv:*)",
+      "mcp__ide__getDiagnostics",
+      "Bash(grep:*)",
+      "Bash(touch:*)",
+      "Bash(timeout 90 python:*)"
     ],
     "deny": []
   }

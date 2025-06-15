@@ -105,7 +105,7 @@ class BrowserCore:
     async def close(self):
         """关闭浏览器"""
         if self.browser:
-            await self.browser.close()
+            # await self.browser.close()
             self.browser = None
             self.context = None
             self.page = None

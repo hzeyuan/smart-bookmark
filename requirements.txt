@@ -1,7 +1,7 @@
 langgraph
 langchain
 langchain-openai
-playwright
+playwright==1.52.0
 fastapi
 pydantic
 python-dotenv

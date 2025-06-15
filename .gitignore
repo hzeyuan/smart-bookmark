@@ -38,7 +38,7 @@ env/
 .env
 
 # Output Files
-outputs/
+outputs
 
 # Logs
 *.log

@@ -12,7 +12,7 @@ from typing import Dict, Any
 from load_env import load_dotenv
 load_dotenv()
 
-from core import WebOrchestrator
+from core import AutomationEngine
 
 # 配置日志
 logging.basicConfig(
@@ -30,7 +30,6 @@ class SmartCrawler:
         # 为每个任务生成唯一ID
         from datetime import datetime
         self.task_id = f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        self.orchestrator = WebOrchestrator(self.task_id)
         logger.info("🚀 智能爬虫初始化完成")
         logger.info(f"📋 任务ID: {self.task_id}")
     
@@ -43,7 +42,18 @@ class SmartCrawler:
         logger.info(f"📋 任务: {instruction}")
         logger.info(f"🌐 网站: {url}")
         
-        result = await self.orchestrator.run(instruction, url)
+        # 使用AutomationEngine执行任务
+        async with AutomationEngine(self.task_id, headless=False) as engine:
+            task_result = await engine.execute_task(instruction, url)
+        
+        # 转换为简洁的结果格式
+        result = {
+            "success": task_result.success,
+            "data": task_result.final_data,
+            "error": task_result.error_message,
+            "steps_taken": task_result.total_steps,
+            "goal_achieved": task_result.task_state.goal_achieved if task_result.task_state else False
+        }
         
         # 简洁的结果展示
         if result["success"]:

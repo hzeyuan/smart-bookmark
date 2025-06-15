@@ -1,5 +1,5 @@
 """
-智能网页自动化提示词系统 - 参考 browser-use 设计
+PlanAgent专用提示词系统
 """
 from typing import Dict, List, Any, Optional
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -48,6 +48,69 @@ class SystemPrompt:
 
     def get_system_message(self) -> SystemMessage:
         return SystemMessage(content=self.system_template)
+
+
+class PlannerPrompt:
+    """规划器专用提示词"""
+    
+    @staticmethod
+    def get_react_instruction() -> str:
+        """获取ReAct模式的详细指导"""
+        return """
+🧠 **ReAct推理模式**
+
+每次回应必须包含：
+
+1. **Thought** (分析推理)
+   - 观察当前页面状态
+   - 分析已完成的操作
+   - 识别下一步的最佳策略
+   - 考虑可能的风险和替代方案
+
+2. **Action** (具体行动)
+   - 选择最合适的操作类型
+   - 指定精确的目标元素
+   - 提供必要的参数值
+
+**示例格式:**
+```
+Thought: 我看到我们已经在B站主页，现在需要在搜索框中输入关键词。页面显示有21个视频，说明页面已加载完成。下一步应该定位搜索框并输入"Python教程"。
+
+Action: {"type": "click", "target": "搜索框"}
+```
+
+**操作类型详解:**
+- navigate: 打开新页面 {"type": "navigate", "target": "https://example.com"}
+- click: 点击元素 {"type": "click", "target": "搜索框/按钮/链接"}
+- type: 输入文本 {"type": "type", "target": "输入框", "value": "要输入的内容"}
+- wait: 等待加载 {"type": "wait", "ms": 2000}
+- extract: 提取数据 {"type": "extract", "target": "数据区域"}
+- scroll: 滚动页面 {"type": "scroll", "direction": "down"}
+"""
+
+
+class ErrorRecoveryPrompt:
+    """错误恢复提示词"""
+    
+    @staticmethod
+    def get_recovery_instruction(error_info: str, step_count: int) -> str:
+        """生成错误恢复指导"""
+        return f"""
+🚨 **错误恢复模式**
+
+检测到操作失败或异常：
+{error_info}
+
+当前已执行 {step_count} 步，请分析失败原因并调整策略：
+
+💡 **恢复策略建议:**
+- 检查页面是否发生了预期外的变化
+- 尝试不同的元素选择器或操作方式
+- 考虑是否需要等待页面加载
+- 评估是否需要回退到前一步重新开始
+
+请用 ReAct 格式重新分析并提出解决方案。
+"""
 
 
 class AgentStatePrompt:
@@ -145,98 +208,3 @@ Action: {"type": "操作类型", "target": "目标元素", "value": "输入值(�
         
         full_content = state_description + react_instruction
         return HumanMessage(content=full_content)
-
-
-class PlannerPrompt:
-    """规划器专用提示词"""
-    
-    @staticmethod
-    def get_react_instruction() -> str:
-        """获取ReAct模式的详细指导"""
-        return """
-🧠 **ReAct推理模式**
-
-每次回应必须包含：
-
-1. **Thought** (分析推理)
-   - 观察当前页面状态
-   - 分析已完成的操作
-   - 识别下一步的最佳策略
-   - 考虑可能的风险和替代方案
-
-2. **Action** (具体行动)
-   - 选择最合适的操作类型
-   - 指定精确的目标元素
-   - 提供必要的参数值
-
-**示例格式:**
-```
-Thought: 我看到我们已经在B站主页，现在需要在搜索框中输入关键词。页面显示有21个视频，说明页面已加载完成。下一步应该定位搜索框并输入"Python教程"。
-
-Action: {"type": "click", "target": "搜索框"}
-```
-
-**操作类型详解:**
-- navigate: 打开新页面 {"type": "navigate", "target": "https://example.com"}
-- click: 点击元素 {"type": "click", "target": "搜索框/按钮/链接"}
-- type: 输入文本 {"type": "type", "target": "输入框", "value": "要输入的内容"}
-- wait: 等待加载 {"type": "wait", "ms": 2000}
-- extract: 提取数据 {"type": "extract", "target": "数据区域"}
-- scroll: 滚动页面 {"type": "scroll", "direction": "down"}
-"""
-
-
-class ErrorRecoveryPrompt:
-    """错误恢复提示词"""
-    
-    @staticmethod
-    def get_recovery_instruction(error_info: str, step_count: int) -> str:
-        """生成错误恢复指导"""
-        return f"""
-🚨 **错误恢复模式**
-
-检测到操作失败或异常：
-{error_info}
-
-当前已执行 {step_count} 步，请分析失败原因并调整策略：
-
-💡 **恢复策略建议:**
-- 检查页面是否发生了预期外的变化
-- 尝试不同的元素选择器或操作方式
-- 考虑是否需要等待页面加载
-- 评估是否需要回退到前一步重新开始
-
-请用 ReAct 格式重新分析并提出解决方案。
-"""
-
-
-class DataExtractionPrompt:
-    """数据提取专用提示词"""
-    
-    @staticmethod
-    def get_extraction_instruction(task: str, raw_data: List[Dict]) -> str:
-        """生成数据提取指导"""
-        return f"""
-📊 **数据提取与优化**
-
-原始任务: {task}
-提取到 {len(raw_data)} 条原始数据
-
-请将原始数据清洗和结构化为用户友好的格式：
-
-🎯 **输出要求:**
-```json
-[
-  {
-    "title": "标题",
-    "url": "链接", 
-    "description": "描述"
-  }
-]
-```
-
-原始数据:
-{raw_data}
-
-请提取并优化数据格式。
-"""
